@@ -1,0 +1,2 @@
+# Legal Aid Funding DAO
+
