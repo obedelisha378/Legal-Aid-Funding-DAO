@@ -9,6 +9,10 @@
 (define-constant ERR-VOTING-ENDED (err u108))
 (define-constant ERR-NOT-MEMBER (err u109))
 (define-constant ERR-PROPOSAL-NOT-PASSED (err u110))
+(define-constant ERR-MULTISIG-REQUIRED (err u111))
+(define-constant ERR-INSUFFICIENT-APPROVALS (err u112))
+(define-constant ERR-NOT-TRUSTEE (err u113))
+(define-constant ERR-ALREADY-APPROVED (err u114))
 
 (define-data-var contract-owner principal tx-sender)
 (define-data-var dao-treasury uint u0)
@@ -16,6 +20,8 @@
 (define-data-var member-counter uint u0)
 (define-data-var minimum-stake uint u1000000)
 (define-data-var voting-period uint u1008)
+(define-data-var multisig-threshold uint u5000000)
+(define-data-var required-approvals uint u3)
 
 (define-map dao-members
     principal
@@ -24,6 +30,7 @@
         reputation: uint,
         joined-at: uint,
         is-active: bool,
+        is-trustee: bool,
     }
 )
 
@@ -42,6 +49,8 @@
         total-voters: uint,
         executed: bool,
         status: (string-ascii 20),
+        requires-multisig: bool,
+        approval-count: uint,
     }
 )
 
@@ -49,6 +58,14 @@
     {
         proposal-id: uint,
         voter: principal,
+    }
+    bool
+)
+
+(define-map multisig-approvals
+    {
+        proposal-id: uint,
+        trustee: principal,
     }
     bool
 )
@@ -138,6 +155,7 @@
             reputation: u100,
             joined-at: stacks-block-height,
             is-active: true,
+            is-trustee: false,
         })
 
         (var-set member-counter (+ (var-get member-counter) u1))
@@ -180,24 +198,27 @@
         (asserts! (<= requested-amount (var-get dao-treasury))
             ERR-INSUFFICIENT-FUNDS
         )
+        (let ((needs-multisig (>= requested-amount (var-get multisig-threshold))))
+            (map-set proposals proposal-id {
+                proposer: tx-sender,
+                title: title,
+                description: description,
+                requested-amount: requested-amount,
+                beneficiary: beneficiary,
+                created-at: current-height,
+                voting-ends-at: voting-end,
+                yes-votes: u0,
+                no-votes: u0,
+                total-voters: u0,
+                executed: false,
+                status: "active",
+                requires-multisig: needs-multisig,
+                approval-count: u0,
+            })
 
-        (map-set proposals proposal-id {
-            proposer: tx-sender,
-            title: title,
-            description: description,
-            requested-amount: requested-amount,
-            beneficiary: beneficiary,
-            created-at: current-height,
-            voting-ends-at: voting-end,
-            yes-votes: u0,
-            no-votes: u0,
-            total-voters: u0,
-            executed: false,
-            status: "active",
-        })
-
-        (var-set proposal-counter proposal-id)
-        (ok proposal-id)
+            (var-set proposal-counter proposal-id)
+            (ok proposal-id)
+        )
     )
 )
 
@@ -262,6 +283,13 @@
             ERR-PROPOSAL-NOT-PASSED
         )
         (asserts! (>= total-votes required-votes) ERR-INSUFFICIENT-FUNDS)
+        (asserts!
+            (if (get requires-multisig proposal)
+                (>= (get approval-count proposal) (var-get required-approvals))
+                true
+            )
+            ERR-INSUFFICIENT-APPROVALS
+        )
 
         (try! (as-contract (stx-transfer? (get requested-amount proposal) tx-sender
             (get beneficiary proposal)
@@ -471,6 +499,125 @@
 
 (define-read-only (get-urgent-cases)
     (var-get case-counter)
+)
+
+(define-public (set-trustee
+        (member principal)
+        (is-trustee-status bool)
+    )
+    (let ((member-data (unwrap! (map-get? dao-members member) ERR-NOT-FOUND)))
+        (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
+        (asserts! (get is-active member-data) ERR-NOT-MEMBER)
+
+        (map-set dao-members member
+            (merge member-data { is-trustee: is-trustee-status })
+        )
+        (ok true)
+    )
+)
+
+(define-public (approve-multisig-proposal (proposal-id uint))
+    (let (
+            (proposal (unwrap! (map-get? proposals proposal-id) ERR-NOT-FOUND))
+            (member-data (unwrap! (map-get? dao-members tx-sender) ERR-NOT-MEMBER))
+        )
+        (asserts! (get is-active member-data) ERR-NOT-MEMBER)
+        (asserts! (get is-trustee member-data) ERR-NOT-TRUSTEE)
+        (asserts! (get requires-multisig proposal) ERR-MULTISIG-REQUIRED)
+        (asserts!
+            (is-none (map-get? multisig-approvals {
+                proposal-id: proposal-id,
+                trustee: tx-sender,
+            }))
+            ERR-ALREADY-APPROVED
+        )
+
+        (map-set multisig-approvals {
+            proposal-id: proposal-id,
+            trustee: tx-sender,
+        }
+            true
+        )
+
+        (map-set proposals proposal-id
+            (merge proposal { approval-count: (+ (get approval-count proposal) u1) })
+        )
+
+        (ok true)
+    )
+)
+
+(define-public (revoke-multisig-approval (proposal-id uint))
+    (let (
+            (proposal (unwrap! (map-get? proposals proposal-id) ERR-NOT-FOUND))
+            (member-data (unwrap! (map-get? dao-members tx-sender) ERR-NOT-MEMBER))
+        )
+        (asserts! (get is-active member-data) ERR-NOT-MEMBER)
+        (asserts! (get is-trustee member-data) ERR-NOT-TRUSTEE)
+        (asserts! (get requires-multisig proposal) ERR-MULTISIG-REQUIRED)
+        (asserts!
+            (is-some (map-get? multisig-approvals {
+                proposal-id: proposal-id,
+                trustee: tx-sender,
+            }))
+            ERR-NOT-FOUND
+        )
+
+        (map-delete multisig-approvals {
+            proposal-id: proposal-id,
+            trustee: tx-sender,
+        })
+
+        (map-set proposals proposal-id
+            (merge proposal { approval-count: (- (get approval-count proposal) u1) })
+        )
+
+        (ok true)
+    )
+)
+
+(define-public (set-multisig-threshold (new-threshold uint))
+    (begin
+        (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
+        (asserts! (> new-threshold u0) ERR-INVALID-AMOUNT)
+
+        (var-set multisig-threshold new-threshold)
+        (ok true)
+    )
+)
+
+(define-public (set-required-approvals (new-count uint))
+    (begin
+        (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
+        (asserts! (> new-count u0) ERR-INVALID-AMOUNT)
+
+        (var-set required-approvals new-count)
+        (ok true)
+    )
+)
+
+(define-read-only (get-multisig-approval
+        (proposal-id uint)
+        (trustee principal)
+    )
+    (map-get? multisig-approvals {
+        proposal-id: proposal-id,
+        trustee: trustee,
+    })
+)
+
+(define-read-only (is-trustee (member principal))
+    (match (map-get? dao-members member)
+        member-data (and (get is-active member-data) (get is-trustee member-data))
+        false
+    )
+)
+
+(define-read-only (get-multisig-settings)
+    {
+        threshold: (var-get multisig-threshold),
+        required-approvals: (var-get required-approvals),
+    }
 )
 
 (define-public (transfer-ownership (new-owner principal))
