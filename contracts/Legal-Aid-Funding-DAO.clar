@@ -13,6 +13,10 @@
 (define-constant ERR-INSUFFICIENT-APPROVALS (err u112))
 (define-constant ERR-NOT-TRUSTEE (err u113))
 (define-constant ERR-ALREADY-APPROVED (err u114))
+(define-constant ERR-MILESTONE-NOT-FOUND (err u115))
+(define-constant ERR-MILESTONE-COMPLETED (err u116))
+(define-constant ERR-MILESTONE-NOT-READY (err u117))
+(define-constant ERR-INVALID-MILESTONE (err u118))
 
 (define-data-var contract-owner principal tx-sender)
 (define-data-var dao-treasury uint u0)
@@ -82,10 +86,28 @@
         case-status: (string-ascii 20),
         created-at: uint,
         urgency-level: uint,
+        has-milestones: bool,
+        milestone-funding: uint,
+    }
+)
+
+(define-map case-milestones
+    uint
+    {
+        milestone-id: uint,
+        case-id: uint,
+        description: (string-ascii 200),
+        funding-amount: uint,
+        is-completed: bool,
+        completed-at: uint,
+        approved-by: principal,
+        created-at: uint,
+        sequence-number: uint,
     }
 )
 
 (define-data-var case-counter uint u0)
+(define-data-var milestone-counter uint u0)
 
 (define-read-only (get-contract-owner)
     (var-get contract-owner)
@@ -134,6 +156,14 @@
 
 (define-read-only (get-case-count)
     (var-get case-counter)
+)
+
+(define-read-only (get-milestone-count)
+    (var-get milestone-counter)
+)
+
+(define-read-only (get-case-milestone (milestone-id uint))
+    (map-get? case-milestones milestone-id)
 )
 
 (define-read-only (get-minimum-stake)
@@ -331,6 +361,8 @@
             case-status: "pending",
             created-at: stacks-block-height,
             urgency-level: urgency-level,
+            has-milestones: false,
+            milestone-funding: u0,
         })
 
         (var-set case-counter case-id)
@@ -618,6 +650,143 @@
         threshold: (var-get multisig-threshold),
         required-approvals: (var-get required-approvals),
     }
+)
+
+(define-public (create-case-milestone
+        (case-id uint)
+        (description (string-ascii 200))
+        (funding-amount uint)
+        (sequence-number uint)
+    )
+    (let (
+            (case-data (unwrap! (map-get? legal-cases case-id) ERR-NOT-FOUND))
+            (milestone-id (+ (var-get milestone-counter) u1))
+        )
+        (asserts!
+            (or
+                (is-eq tx-sender (get lawyer case-data))
+                (is-eq tx-sender (get client case-data))
+            )
+            ERR-NOT-AUTHORIZED
+        )
+        (asserts! (> funding-amount u0) ERR-INVALID-AMOUNT)
+        (asserts! (> sequence-number u0) ERR-INVALID-MILESTONE)
+        (asserts!
+            (<= (+ (get milestone-funding case-data) funding-amount)
+                (get amount-requested case-data)
+            )
+            ERR-INSUFFICIENT-FUNDS
+        )
+
+        (map-set case-milestones milestone-id {
+            milestone-id: milestone-id,
+            case-id: case-id,
+            description: description,
+            funding-amount: funding-amount,
+            is-completed: false,
+            completed-at: u0,
+            approved-by: tx-sender,
+            created-at: stacks-block-height,
+            sequence-number: sequence-number,
+        })
+
+        (map-set legal-cases case-id
+            (merge case-data {
+                has-milestones: true,
+                milestone-funding: (+ (get milestone-funding case-data) funding-amount),
+            })
+        )
+
+        (var-set milestone-counter milestone-id)
+        (ok milestone-id)
+    )
+)
+
+(define-public (complete-milestone (milestone-id uint))
+    (let (
+            (milestone-data (unwrap! (map-get? case-milestones milestone-id)
+                ERR-MILESTONE-NOT-FOUND
+            ))
+            (case-data (unwrap! (map-get? legal-cases (get case-id milestone-data))
+                ERR-NOT-FOUND
+            ))
+        )
+        (asserts!
+            (or
+                (is-eq tx-sender (get lawyer case-data))
+                (is-dao-member tx-sender)
+            )
+            ERR-NOT-AUTHORIZED
+        )
+        (asserts! (not (get is-completed milestone-data)) ERR-MILESTONE-COMPLETED)
+
+        (map-set case-milestones milestone-id
+            (merge milestone-data {
+                is-completed: true,
+                completed-at: stacks-block-height,
+                approved-by: tx-sender,
+            })
+        )
+
+        (ok true)
+    )
+)
+
+(define-public (fund-milestone (milestone-id uint))
+    (let (
+            (milestone-data (unwrap! (map-get? case-milestones milestone-id)
+                ERR-MILESTONE-NOT-FOUND
+            ))
+            (case-data (unwrap! (map-get? legal-cases (get case-id milestone-data))
+                ERR-NOT-FOUND
+            ))
+            (funding-amount (get funding-amount milestone-data))
+        )
+        (asserts! (is-dao-member tx-sender) ERR-NOT-MEMBER)
+        (asserts! (get is-completed milestone-data) ERR-MILESTONE-NOT-READY)
+        (asserts! (>= (stx-get-balance tx-sender) funding-amount)
+            ERR-INSUFFICIENT-FUNDS
+        )
+
+        (try! (stx-transfer? funding-amount tx-sender (get client case-data)))
+
+        (map-set legal-cases (get case-id milestone-data)
+            (merge case-data {
+                amount-funded: (+ (get amount-funded case-data) funding-amount),
+                case-status: (if (is-eq (+ (get amount-funded case-data) funding-amount)
+                        (get amount-requested case-data)
+                    )
+                    "fully-funded"
+                    "partially-funded"
+                ),
+            })
+        )
+
+        (ok true)
+    )
+)
+
+(define-read-only (get-case-milestones-summary (case-id uint))
+    (match (map-get? legal-cases case-id)
+        case-data
+        {
+            has-milestones: (get has-milestones case-data),
+            total-milestone-funding: (get milestone-funding case-data),
+            remaining-amount: (- (get amount-requested case-data) (get milestone-funding case-data)),
+        }
+        {
+            has-milestones: false,
+            total-milestone-funding: u0,
+            remaining-amount: u0,
+        }
+    )
+)
+
+(define-read-only (is-milestone-ready-for-funding (milestone-id uint))
+    (match (map-get? case-milestones milestone-id)
+        milestone-data (get is-completed milestone-data)
+        false
+    )
 )
 
 (define-public (transfer-ownership (new-owner principal))
