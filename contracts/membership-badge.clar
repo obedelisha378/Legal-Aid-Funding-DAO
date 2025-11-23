@@ -8,53 +8,77 @@
 (define-data-var next-token-id uint u0)
 (define-data-var total-supply uint u0)
 
-(define-map token-owners uint principal)
-(define-map owner-token principal uint)
+(define-map token-owners
+  uint
+  principal
+)
+(define-map owner-token
+  principal
+  uint
+)
 
 (define-read-only (get-contract-owner)
-  (var-get contract-owner))
+  (var-get contract-owner)
+)
 
 (define-read-only (get-dao-contract)
-  (var-get dao-contract))
+  (var-get dao-contract)
+)
 
 (define-read-only (get-total-supply)
-  (var-get total-supply))
+  (var-get total-supply)
+)
 
 (define-read-only (get-token-owner (token-id uint))
-  (map-get? token-owners token-id))
+  (map-get? token-owners token-id)
+)
 
 (define-read-only (get-owner-token (owner principal))
-  (map-get? owner-token owner))
+  (map-get? owner-token owner)
+)
 
 (define-read-only (owns (owner principal))
-  (is-some (map-get? owner-token owner)))
+  (is-some (map-get? owner-token owner))
+)
 
 (define-public (set-dao-contract (dao principal))
   (begin
     (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
     (var-set dao-contract dao)
-    (ok true)))
+    (ok true)
+  )
+)
 
 (define-public (mint)
-  (let (
-        (already (map-get? owner-token tx-sender)))
-    (asserts! (contract-call? .Legal-Aid-Funding-DAO is-dao-member tx-sender) ERR-NOT-MEMBER)
+  (let ((already (map-get? owner-token tx-sender)))
+    (asserts! (contract-call? .Legal-Aid-Funding-DAO is-dao-member tx-sender)
+      ERR-NOT-MEMBER
+    )
     (asserts! (is-none already) ERR-ALREADY-OWNED)
-    (let (
-          (new-id (+ (var-get next-token-id) u1)))
+    (let ((new-id (+ (var-get next-token-id) u1)))
       (map-set token-owners new-id tx-sender)
       (map-set owner-token tx-sender new-id)
       (var-set next-token-id new-id)
       (var-set total-supply (+ (var-get total-supply) u1))
-      (ok new-id))))
+      (ok new-id)
+    )
+  )
+)
 
-(define-public (transfer (token-id uint) (recipient principal))
+(define-public (transfer
+    (token-id uint)
+    (recipient principal)
+  )
   (begin
     (asserts! false ERR-NON-TRANSFERABLE)
-    (ok false)))
+    (ok false)
+  )
+)
 
 (define-public (transfer-ownership (new-owner principal))
   (begin
     (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
     (var-set contract-owner new-owner)
-    (ok true)))
+    (ok true)
+  )
+)

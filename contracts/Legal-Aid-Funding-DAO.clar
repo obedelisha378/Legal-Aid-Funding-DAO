@@ -91,6 +91,17 @@
     }
 )
 
+(define-map case-contributions
+    {
+        case-id: uint,
+        contributor: principal,
+    }
+    {
+        total-amount: uint,
+        last-contribution-height: uint,
+    }
+)
+
 (define-map case-milestones
     uint
     {
@@ -164,6 +175,38 @@
 
 (define-read-only (get-case-milestone (milestone-id uint))
     (map-get? case-milestones milestone-id)
+)
+
+(define-read-only (get-case-contribution
+        (case-id uint)
+        (contributor principal)
+    )
+    (map-get? case-contributions {
+        case-id: case-id,
+        contributor: contributor,
+    })
+)
+
+(define-private (update-case-contribution
+        (case-id uint)
+        (contributor principal)
+        (amount uint)
+    )
+    (let ((key {
+            case-id: case-id,
+            contributor: contributor,
+        }))
+        (match (map-get? case-contributions key)
+            existing (map-set case-contributions key {
+                total-amount: (+ (get total-amount existing) amount),
+                last-contribution-height: stacks-block-height,
+            })
+            (map-set case-contributions key {
+                total-amount: amount,
+                last-contribution-height: stacks-block-height,
+            })
+        )
+    )
 )
 
 (define-read-only (get-minimum-stake)
@@ -385,6 +428,8 @@
         (asserts! (>= (stx-get-balance tx-sender) amount) ERR-INSUFFICIENT-FUNDS)
 
         (try! (stx-transfer? amount tx-sender (get client case-data)))
+
+        (update-case-contribution case-id tx-sender amount)
 
         (map-set legal-cases case-id
             (merge case-data {
@@ -741,6 +786,7 @@
                 ERR-NOT-FOUND
             ))
             (funding-amount (get funding-amount milestone-data))
+            (case-id (get case-id milestone-data))
         )
         (asserts! (is-dao-member tx-sender) ERR-NOT-MEMBER)
         (asserts! (get is-completed milestone-data) ERR-MILESTONE-NOT-READY)
@@ -750,7 +796,9 @@
 
         (try! (stx-transfer? funding-amount tx-sender (get client case-data)))
 
-        (map-set legal-cases (get case-id milestone-data)
+        (update-case-contribution case-id tx-sender funding-amount)
+
+        (map-set legal-cases case-id
             (merge case-data {
                 amount-funded: (+ (get amount-funded case-data) funding-amount),
                 case-status: (if (is-eq (+ (get amount-funded case-data) funding-amount)
